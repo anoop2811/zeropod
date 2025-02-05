@@ -62,6 +62,17 @@ static __always_inline int ingress_redirect(struct tcphdr *tcp) {
     __be16 sport_h = bpf_ntohs(tcp->source);
     __be16 dport_h = bpf_ntohs(tcp->dest);
 
+    struct liveness_key key = {0};
+  
+    // Check if the incoming packet is a liveness probe
+    if (is_liveness_probe(skb, &key)) {
+        char *cached_response = bpf_map_lookup_elem(&liveness_cache, &key);
+        if (cached_response) {
+              return send_cached_response(skb, cached_response);
+        }
+        // If no cached response, let it pass so we can store it on egress.
+    }
+
     void *active_connections_map = &active_connections;
 
     void *redirect_map = &ingress_redirects;
@@ -126,6 +137,97 @@ static __always_inline int parse_and_redirect(struct __sk_buff *ctx, bool ingres
     return 0;
 }
 
+static __always_inline int is_liveness_probe(struct __sk_buff *skb, struct liveness_key *key_out) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct iphdr *iph = data;
+    if ((void *)(iph + 1) > data_end)
+         return 0;
+    if (iph->protocol != IPPROTO_TCP)
+         return 0;
+
+    struct tcphdr *tcph = data + (iph->ihl * 4);
+    if ((void *)(tcph + 1) > data_end)
+         return 0;
+
+    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
+    if (http >= data_end)
+         return 0;
+
+    char probe[] = "GET /healthz";
+    int probe_len = sizeof(probe) - 1;
+    if (http + probe_len > data_end)
+         return 0;
+
+    int i;
+    #pragma unroll
+    for (i = 0; i < probe_len; i++) {
+         if (((char *)http)[i] != probe[i])
+              return 0;
+    }
+
+    key_out->netns = bpf_get_netns_cookie(skb);
+    key_out->daddr = iph->daddr;
+    key_out->dport = tcph->dest;
+    return 1;
+}
+
+static __always_inline int is_liveness_probe_response(struct __sk_buff *skb, struct liveness_key *key_out) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct iphdr *iph = data;
+    if ((void *)(iph + 1) > data_end)
+         return 0;
+    if (iph->protocol != IPPROTO_TCP)
+         return 0;
+
+    struct tcphdr *tcph = data + (iph->ihl * 4);
+    if ((void *)(tcph + 1) > data_end)
+         return 0;
+
+    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
+    if (http >= data_end)
+         return 0;
+
+    char response[] = "HTTP/1.1 200 OK";
+    int response_len = sizeof(response) - 1;
+    if (http + response_len > data_end)
+         return 0;
+
+    int i;
+    #pragma unroll
+    for (i = 0; i < response_len; i++) {
+         if (((char *)http)[i] != response[i])
+              return 0;
+    }
+
+    key_out->netns = bpf_get_netns_cookie(skb);
+    key_out->daddr = iph->saddr; // src addr becomes dest addr on ingress
+    key_out->dport = tcph->source; // src port becomes dest port on ingress
+    return 1;
+}
+
+static __always_inline void cache_probe_response(struct __sk_buff *skb, struct liveness_key *key) {
+    char response[512];
+    if (bpf_skb_load_bytes(skb, 0, response, sizeof(response)) < 0)
+         return;
+
+    bpf_map_update_elem(&liveness_cache, key, response, BPF_ANY);
+}
+
+static __always_inline int send_cached_response(struct __sk_buff *skb, char *cached_response) {
+    if (!cached_response)
+         return TC_ACT_SHOT;
+
+    int resp_len = 512;
+    if (bpf_skb_store_bytes(skb, 0, cached_response, resp_len, 0) < 0)
+         return TC_ACT_SHOT;
+
+    return TC_ACT_OK;
+}
+
 
 SEC("tc")
 int tc_redirect_ingress(struct __sk_buff *skb) {
@@ -134,5 +236,12 @@ int tc_redirect_ingress(struct __sk_buff *skb) {
 
 SEC("tc")
 int tc_redirect_egress(struct __sk_buff *skb) {
+    struct liveness_key key = {0};
+
+    // Check if the packet is a liveness probe response (HTTP 200 OK)
+    if (is_liveness_probe_response(skb, &key)) {
+         cache_probe_response(skb, &key);
+    }
+
     return parse_and_redirect(skb, false);
 }
