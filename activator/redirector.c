@@ -10,6 +10,14 @@ char __license[] SEC("license") = "Dual MIT/GPL";
 #define TC_ACT_SHOT 2
 
 struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct liveness_key);
+} liveness_key_map SEC(".maps");
+
+
+struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 128);
     __type(key, __be16);   // sport
