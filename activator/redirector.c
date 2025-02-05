@@ -252,7 +252,13 @@ int tc_redirect_ingress(struct __sk_buff *skb) {
 
 SEC("tc")
 int tc_redirect_egress(struct __sk_buff *skb) {
-    struct liveness_key key = {0};
+   
+    struct liveness_key *key;
+    __u32 zero = 0;
+    key = bpf_map_lookup_elem(&liveness_key_map, &zero);
+    if (!key) {
+        return TC_ACT_OK;  // Avoid stack overflows
+    }
 
     // Check if the packet is a liveness probe response (HTTP 200 OK)
     if (is_liveness_probe_response(skb, &key)) {
