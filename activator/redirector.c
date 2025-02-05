@@ -164,7 +164,7 @@ static __always_inline int disabled(__be16 sport_h, __be16 dport_h) {
     return 0;
 };
 
-static __always_inline int ingress_redirect(struct tcphdr *tcp) {
+static __always_inline int ingress_redirect(struct __sk_buff *skb, struct tcphdr *tcp) {
     __be16 sport_h = bpf_ntohs(tcp->source);
     __be16 dport_h = bpf_ntohs(tcp->dest);
 
@@ -203,7 +203,7 @@ static __always_inline int ingress_redirect(struct tcphdr *tcp) {
     return TC_ACT_OK;
 }
 
-static __always_inline int egress_redirect(struct tcphdr *tcp) {
+static __always_inline int egress_redirect(struct __sk_buff *skb, struct tcphdr *tcp) {
     __be16 sport_h = bpf_ntohs(tcp->source);
     // __be16 dport_h = bpf_ntohs(tcp->dest);
 
@@ -231,10 +231,10 @@ static __always_inline int parse_and_redirect(struct __sk_buff *ctx, bool ingres
                 struct tcphdr *tcp = (void*)ip + sizeof(*ip);
                 if ((void*)tcp + sizeof(*tcp) <= data_end) {
                     if (ingress) {
-                        return ingress_redirect(tcp);
+                        return ingress_redirect(ctx, tcp);
                     }
 
-                    return egress_redirect(tcp);
+                    return egress_redirect(ctx, tcp);
                 }
             }
         }
