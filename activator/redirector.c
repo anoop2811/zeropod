@@ -176,11 +176,15 @@ static __always_inline int ingress_redirect(struct __sk_buff *skb, struct tcphdr
     __be16 sport_h = bpf_ntohs(tcp->source);
     __be16 dport_h = bpf_ntohs(tcp->dest);
 
-    struct liveness_key key = {0};
-  
+    struct liveness_key *key;
+    __u32 zero = 0;
+    key = bpf_map_lookup_elem(&liveness_key_map, &zero);
+    if (!key) {
+        return TC_ACT_OK;  // Prevent stack overflow
+    }  
     // Check if the incoming packet is a liveness probe
-    if (is_liveness_probe(skb, &key)) {
-        char *cached_response = bpf_map_lookup_elem(&liveness_cache, &key);
+    if (is_liveness_probe(skb, key)) {
+        char *cached_response = bpf_map_lookup_elem(&liveness_cache, key);
         if (cached_response) {
               return send_cached_response(skb, cached_response);
         }
@@ -269,8 +273,8 @@ int tc_redirect_egress(struct __sk_buff *skb) {
     }
 
     // Check if the packet is a liveness probe response (HTTP 200 OK)
-    if (is_liveness_probe_response(skb, &key)) {
-         cache_probe_response(skb, &key);
+    if (is_liveness_probe_response(skb, key)) {
+         cache_probe_response(skb, key);
     }
 
     return parse_and_redirect(skb, false);
