@@ -151,7 +151,6 @@ static __always_inline int is_liveness_probe_response(struct __sk_buff *skb, str
 }
 
 static __always_inline void cache_probe_response(struct __sk_buff *skb, struct liveness_key *key) {
-    char response[512];
     char *response = bpf_map_lookup_elem(&response_cache, &zero);
     if (!response)
         return;
