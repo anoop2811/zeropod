@@ -7,6 +7,7 @@
 char __license[] SEC("license") = "Dual MIT/GPL";
 
 #define TC_ACT_OK 0
+#define TC_ACT_SHOT 2
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -40,6 +41,111 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } active_connections SEC(".maps");
 
+struct liveness_key {
+    __u32 netns;   // Unique network namespace cookie
+    __u32 daddr;   // Destination IPv4 address (from IP header)
+    __u16 dport;   // Destination port (from TCP header, in network byte order)
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct liveness_key);
+    __type(value, char[512]);  // Cached HTTP response (e.g., "HTTP/1.1 200 OK ...")
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} liveness_cache SEC(".maps");
+
+
+static __always_inline int is_liveness_probe(struct __sk_buff *skb, struct liveness_key *key_out) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct iphdr *iph = data;
+    if ((void *)(iph + 1) > data_end)
+         return 0;
+    if (iph->protocol != IPPROTO_TCP)
+         return 0;
+
+    struct tcphdr *tcph = data + (iph->ihl * 4);
+    if ((void *)(tcph + 1) > data_end)
+         return 0;
+
+    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
+    if (http >= data_end)
+         return 0;
+
+    char probe[] = "GET /healthz";
+    int probe_len = sizeof(probe) - 1;
+    if (http + probe_len > data_end)
+         return 0;
+
+    int i;
+    #pragma unroll
+    for (i = 0; i < probe_len; i++) {
+         if (((char *)http)[i] != probe[i])
+              return 0;
+    }
+
+    key_out->netns = bpf_get_netns_cookie(skb);
+    key_out->daddr = iph->daddr;
+    key_out->dport = tcph->dest;
+    return 1;
+}
+
+static __always_inline int is_liveness_probe_response(struct __sk_buff *skb, struct liveness_key *key_out) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct iphdr *iph = data;
+    if ((void *)(iph + 1) > data_end)
+         return 0;
+    if (iph->protocol != IPPROTO_TCP)
+         return 0;
+
+    struct tcphdr *tcph = data + (iph->ihl * 4);
+    if ((void *)(tcph + 1) > data_end)
+         return 0;
+
+    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
+    if (http >= data_end)
+         return 0;
+
+    char response[] = "HTTP/1.1 200 OK";
+    int response_len = sizeof(response) - 1;
+    if (http + response_len > data_end)
+         return 0;
+
+    int i;
+    #pragma unroll
+    for (i = 0; i < response_len; i++) {
+         if (((char *)http)[i] != response[i])
+              return 0;
+    }
+
+    key_out->netns = bpf_get_netns_cookie(skb);
+    key_out->daddr = iph->saddr; // src addr becomes dest addr on ingress
+    key_out->dport = tcph->source; // src port becomes dest port on ingress
+    return 1;
+}
+
+static __always_inline void cache_probe_response(struct __sk_buff *skb, struct liveness_key *key) {
+    char response[512];
+    if (bpf_skb_load_bytes(skb, 0, response, sizeof(response)) < 0)
+         return;
+
+    bpf_map_update_elem(&liveness_cache, key, response, BPF_ANY);
+}
+
+static __always_inline int send_cached_response(struct __sk_buff *skb, char *cached_response) {
+    if (!cached_response)
+         return TC_ACT_SHOT;
+
+    int resp_len = 512;
+    if (bpf_skb_store_bytes(skb, 0, cached_response, resp_len, 0) < 0)
+         return TC_ACT_SHOT;
+
+    return TC_ACT_OK;
+}
 static __always_inline int disabled(__be16 sport_h, __be16 dport_h) {
     void *disable_redirect_map = &disable_redirect;
 
@@ -137,96 +243,6 @@ static __always_inline int parse_and_redirect(struct __sk_buff *ctx, bool ingres
     return 0;
 }
 
-static __always_inline int is_liveness_probe(struct __sk_buff *skb, struct liveness_key *key_out) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    struct iphdr *iph = data;
-    if ((void *)(iph + 1) > data_end)
-         return 0;
-    if (iph->protocol != IPPROTO_TCP)
-         return 0;
-
-    struct tcphdr *tcph = data + (iph->ihl * 4);
-    if ((void *)(tcph + 1) > data_end)
-         return 0;
-
-    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
-    if (http >= data_end)
-         return 0;
-
-    char probe[] = "GET /healthz";
-    int probe_len = sizeof(probe) - 1;
-    if (http + probe_len > data_end)
-         return 0;
-
-    int i;
-    #pragma unroll
-    for (i = 0; i < probe_len; i++) {
-         if (((char *)http)[i] != probe[i])
-              return 0;
-    }
-
-    key_out->netns = bpf_get_netns_cookie(skb);
-    key_out->daddr = iph->daddr;
-    key_out->dport = tcph->dest;
-    return 1;
-}
-
-static __always_inline int is_liveness_probe_response(struct __sk_buff *skb, struct liveness_key *key_out) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    struct iphdr *iph = data;
-    if ((void *)(iph + 1) > data_end)
-         return 0;
-    if (iph->protocol != IPPROTO_TCP)
-         return 0;
-
-    struct tcphdr *tcph = data + (iph->ihl * 4);
-    if ((void *)(tcph + 1) > data_end)
-         return 0;
-
-    void *http = data + (iph->ihl * 4) + (tcph->doff * 4);
-    if (http >= data_end)
-         return 0;
-
-    char response[] = "HTTP/1.1 200 OK";
-    int response_len = sizeof(response) - 1;
-    if (http + response_len > data_end)
-         return 0;
-
-    int i;
-    #pragma unroll
-    for (i = 0; i < response_len; i++) {
-         if (((char *)http)[i] != response[i])
-              return 0;
-    }
-
-    key_out->netns = bpf_get_netns_cookie(skb);
-    key_out->daddr = iph->saddr; // src addr becomes dest addr on ingress
-    key_out->dport = tcph->source; // src port becomes dest port on ingress
-    return 1;
-}
-
-static __always_inline void cache_probe_response(struct __sk_buff *skb, struct liveness_key *key) {
-    char response[512];
-    if (bpf_skb_load_bytes(skb, 0, response, sizeof(response)) < 0)
-         return;
-
-    bpf_map_update_elem(&liveness_cache, key, response, BPF_ANY);
-}
-
-static __always_inline int send_cached_response(struct __sk_buff *skb, char *cached_response) {
-    if (!cached_response)
-         return TC_ACT_SHOT;
-
-    int resp_len = 512;
-    if (bpf_skb_store_bytes(skb, 0, cached_response, resp_len, 0) < 0)
-         return TC_ACT_SHOT;
-
-    return TC_ACT_OK;
-}
 
 
 SEC("tc")
