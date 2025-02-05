@@ -63,6 +63,20 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } liveness_cache SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, char[512]);
+} response_cache SEC(".maps");
+
+static __always_inline struct liveness_key *get_liveness_key() {
+    __u32 zero = 0;
+    struct liveness_key *key = bpf_map_lookup_elem(&liveness_key_map, &zero);
+    if (!key)
+        return NULL;
+    return key;
+}
 
 static __always_inline int is_liveness_probe(struct __sk_buff *skb, struct liveness_key *key_out) {
     void *data = (void *)(long)skb->data;
@@ -138,6 +152,10 @@ static __always_inline int is_liveness_probe_response(struct __sk_buff *skb, str
 
 static __always_inline void cache_probe_response(struct __sk_buff *skb, struct liveness_key *key) {
     char response[512];
+    char *response = bpf_map_lookup_elem(&response_cache, &zero);
+    if (!response)
+        return;
+
     if (bpf_skb_load_bytes(skb, 0, response, sizeof(response)) < 0)
          return;
 
@@ -154,6 +172,8 @@ static __always_inline int send_cached_response(struct __sk_buff *skb, char *cac
 
     return TC_ACT_OK;
 }
+
+
 static __always_inline int disabled(__be16 sport_h, __be16 dport_h) {
     void *disable_redirect_map = &disable_redirect;
 
@@ -264,7 +284,6 @@ int tc_redirect_ingress(struct __sk_buff *skb) {
 
 SEC("tc")
 int tc_redirect_egress(struct __sk_buff *skb) {
-   
     struct liveness_key *key;
     __u32 zero = 0;
     key = bpf_map_lookup_elem(&liveness_key_map, &zero);
