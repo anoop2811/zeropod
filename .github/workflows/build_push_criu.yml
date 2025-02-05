@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  CRIU_IMAGE_NAME: ${{ github.repository }}-criu
+  CRIU_IMAGE_NAME: gw-${{ github.repository }}-criu
   CRIU_VERSION: v4.0
 
 jobs:
@@ -42,7 +42,6 @@ jobs:
           file: ./criu/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags:
-            ${{ env.REGISTRY }}/${{ env.CRIU_IMAGE_NAME }}:${{env.CRIU_VERSION}}
+          tags: ${{ env.REGISTRY }}/${{ env.CRIU_IMAGE_NAME }}:${{env.CRIU_VERSION}}
           labels: ${{ steps.meta_criu.outputs.labels }}
           build-args: CRIU_VERSION=${{ env.CRIU_VERSION }}

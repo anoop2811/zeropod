@@ -7,9 +7,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  INSTALLER_IMAGE_NAME: ${{ github.repository }}-installer
-  MANAGER_IMAGE_NAME: ${{ github.repository }}-manager
-  CRIU_IMAGE_NAME: ${{ github.repository }}-criu
+  INSTALLER_IMAGE_NAME: gw-${{ github.repository }}-installer
+  MANAGER_IMAGE_NAME: gw-${{ github.repository }}-manager
+  CRIU_IMAGE_NAME: gw-${{ github.repository }}-criu
 
 jobs:
   push_to_registry:
