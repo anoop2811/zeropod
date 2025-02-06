@@ -70,13 +70,13 @@ struct {
     __type(value, char[512]);
 } response_cache SEC(".maps");
 
-static __always_inline struct liveness_key *get_liveness_key() {
-    __u32 zero = 0;
-    struct liveness_key *key = bpf_map_lookup_elem(&liveness_key_map, &zero);
-    if (!key)
-        return NULL;
-    return key;
-}
+// static __always_inline struct liveness_key *get_liveness_key() {
+//     __u32 zero = 0;
+//     struct liveness_key *key = bpf_map_lookup_elem(&liveness_key_map, &zero);
+//     if (!key)
+//         return NULL;
+//     return key;
+// }
 
 static __always_inline int is_liveness_probe(struct __sk_buff *skb, struct liveness_key *key_out) {
     void *data = (void *)(long)skb->data;
